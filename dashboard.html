@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AMO Digital Twin - Ultra</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body class="bg-gray-950 text-white h-screen overflow-hidden font-mono">
+
+<div id="root"></div>
+
+<script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+    const API = "http://127.0.0.1:8000";
+
+    // --- HIGH-FIDELITY ASSETS ---
+    
+    // Reusable Materials
+    const matBlackMetal = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.7, metalness: 0.2 });
+    const matSilver = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2, metalness: 0.8 });
+    const matGlass = new THREE.MeshPhysicalMaterial({ 
+        color: 0xffffff, 
+        metalness: 0.1, 
+        roughness: 0.05, 
+        transmission: 0.9, // Glass-like
+        thickness: 0.5,
+        transparent: true,
+        opacity: 0.8
+    });
+
+    const createKinematicMount = () => {
+        // The "L" bracket style mount
+        const group = new THREE.Group();
+        
+        // Post
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.6, 32), matBlackMetal);
+        post.position.y = -0.3;
+        
+        // Backplate
+        const plate = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.05), matBlackMetal);
+        plate.position.set(0, 0, 0.05); // Behind optic
+        
+        // Adjustment Knobs (Red details)
+        const knobGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.1, 16);
+        const matKnob = new THREE.MeshStandardMaterial({ color: 0xb91c1c, metalness: 0.5 }); // Red anodized
+        
+        const k1 = new THREE.Mesh(knobGeo, matKnob);
+        k1.rotation.x = Math.PI/2; k1.position.set(0.15, 0.15, 0.1);
+        
+        const k2 = new THREE.Mesh(knobGeo, matKnob);
+        k2.rotation.x = Math.PI/2; k2.position.set(-0.15, 0.15, 0.1);
+
+        group.add(post, plate, k1, k2);
+        return group;
+    }
+
+    const createLaser = (color) => {
+        const group = new THREE.Group();
+        // Heatsink Body (Ridged)
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.4, 0.4), matBlackMetal);
+        // Warning Label
+        const label = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.2), new THREE.MeshBasicMaterial({color: 0xffff00}));
+        label.position.set(0, 0.21, 0);
+        label.rotation.x = -Math.PI/2;
+        // Aperture Ring
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.06, 0.02, 16, 32), matSilver);
+        ring.position.z = -0.2;
+        // Glow
+        const glow = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.1), new THREE.MeshBasicMaterial({color: 0xff0000}));
+        glow.rotation.x = Math.PI/2; glow.position.z = -0.22;
+
+        group.add(body, label, ring, glow);
+        
+        // Post
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.4, 32), matBlackMetal);
+        post.position.y = -0.4;
+        group.add(post);
+        return group;
+    }
+
+    const createMirror = () => {
+        const group = new THREE.Group();
+        const mount = createKinematicMount();
+        // The Optic
+        const mirror = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.05, 64), matSilver);
+        mirror.rotation.x = Math.PI / 2;
+        
+        group.add(mount, mirror);
+        return group;
+    }
+
+    const createPBS = () => {
+        const group = new THREE.Group();
+        // Cube
+        const cube = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 0.35), matGlass);
+        // Platform
+        const base = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.05, 32), matBlackMetal);
+        base.position.y = -0.2;
+        // Post
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.5, 32), matBlackMetal);
+        post.position.y = -0.45;
+        
+        group.add(cube, base, post);
+        return group;
+    }
+
+    const createLens = (color) => {
+        const group = new THREE.Group();
+        const mount = createKinematicMount();
+        // Rotation Stage Ring
+        const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.05, 64), matBlackMetal);
+        ring.rotation.x = Math.PI/2;
+        // Glass
+        const glass = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.02, 64), 
+            new THREE.MeshPhysicalMaterial({ color: color, transmission: 0.9, roughness: 0.2, metalness: 0.1 })
+        );
+        glass.rotation.x = Math.PI/2;
+        
+        group.add(mount, ring, glass);
+        return group;
+    }
+
+    // --- 3D SCENE ---
+    function OpticalTable({ blocks }) {
+        const mountRef = useRef(null);
+        
+        useEffect(() => {
+            if (!mountRef.current) return;
+            
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050505); // Pitch black lab
+            scene.fog = new THREE.FogExp2(0x050505, 0.08);
+            
+            const camera = new THREE.PerspectiveCamera(50, mountRef.current.clientWidth / mountRef.current.clientHeight, 0.1, 100);
+            camera.position.set(6, 7, 7);
+            camera.lookAt(2, 0, 0);
+            
+            const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+            renderer.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            mountRef.current.innerHTML = "";
+            mountRef.current.appendChild(renderer.domElement);
+
+            // --- LIGHTING ---
+            const ambient = new THREE.AmbientLight(0xffffff, 0.1);
+            scene.add(ambient);
+            
+            const spot = new THREE.SpotLight(0xffffff, 20);
+            spot.position.set(5, 12, 5);
+            spot.angle = 0.5;
+            spot.penumbra = 0.5;
+            scene.add(spot);
+
+            const blueRim = new THREE.PointLight(0x0044ff, 2);
+            blueRim.position.set(-5, 3, -5);
+            scene.add(blueRim);
+
+            // Table Surface
+            const grid = new THREE.GridHelper(20, 20, 0x333333, 0x111111);
+            scene.add(grid);
+
+            // Render Blocks
+            (blocks || []).forEach(b => {
+                if (!b.viz) return;
+                let mesh;
+                const type = b.viz.model_type || "box";
+                
+                if (type.includes("mirror")) mesh = createMirror();
+                else if (type.includes("laser")) mesh = createLaser(b.viz.color);
+                else if (type.includes("pbs") || type.includes("cube")) mesh = createPBS();
+                else if (type.includes("lens")) mesh = createLens(b.viz.color);
+                else if (type.includes("detector")) mesh = createPBS(); // Placeholder
+                else mesh = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.5,0.5), matBlackMetal);
+
+                mesh.position.set(b.viz.x || 0, 0.5, -(b.viz.y || 0));
+                mesh.rotation.y = -(b.viz.rotation || 0) * (Math.PI / 180);
+                scene.add(mesh);
+            });
+
+            // Laser Beam (Core + Glow)
+            if (blocks && blocks.length > 0) {
+                const points = blocks.map(b => new THREE.Vector3(b.viz.x, 0.5, -b.viz.y));
+                if(points.length > 1) {
+                    const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+                    
+                    // Inner Core
+                    const coreMat = new THREE.LineBasicMaterial({ color: 0xffaaaa, linewidth: 1 });
+                    scene.add(new THREE.Line(lineGeo, coreMat));
+                    
+                    // Outer Glow
+                     const glowMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 4, transparent: true, opacity: 0.5 });
+                    scene.add(new THREE.Line(lineGeo, glowMat));
+                }
+            }
+
+            const animate = () => { requestAnimationFrame(animate); renderer.render(scene, camera); };
+            animate();
+            return () => { if (mountRef.current) mountRef.current.innerHTML = ""; };
+        }, [blocks]);
+
+        return <div ref={mountRef} className="w-full h-full" />;
+    }
+
+    function App() {
+        const [blocks, setBlocks] = useState([]);
+        const [telemetry, setTelemetry] = useState({});
+        const [logs, setLogs] = useState([
+            "System Initialized.", 
+            "Physics Engine: READY", 
+        ]);
+        const [listening, setListening] = useState(false);
+
+        const log = (msg) => setLogs(p => [`> ${msg}`, ...p.slice(0, 12)]);
+
+        const refresh = async () => {
+            try {
+                const r1 = await fetch(`${API}/api/circuit`);
+                const d1 = await r1.json();
+                if(d1.blocks) setBlocks(d1.blocks);
+                const r2 = await fetch(`${API}/api/simulate`);
+                const d2 = await r2.json();
+                if(d2.telemetry) setTelemetry(d2.telemetry);
+            } catch(e) {}
+        };
+
+        useEffect(() => { refresh(); const i = setInterval(refresh, 1000); return () => clearInterval(i); }, []);
+
+        const sendCmd = async (txt) => {
+            log(`USER: "${txt}"`);
+            try {
+                const r = await fetch(`${API}/api/ai/command`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({natural_language:txt})});
+                const d = await r.json();
+                log(`SYS: ${d.ai_response}`);
+                refresh();
+            } catch(e) { log("ERR: API Offline"); }
+        };
+
+        const toggleMic = () => {
+            if(!window.webkitSpeechRecognition) return alert("Chrome only.");
+            const r = new window.webkitSpeechRecognition();
+            r.continuous = false;
+            r.onstart = () => { setListening(true); log("Listening..."); }
+            r.onresult = (e) => { sendCmd(e.results[0][0].transcript); setListening(false); }
+            r.onerror = () => setListening(false);
+            r.start();
+        };
+
+        return (
+            <div className="flex h-screen w-full bg-neutral-950 text-blue-100 font-mono overflow-hidden">
+                
+                {/* LEFT HUD */}
+                <div className="w-96 flex flex-col border-r border-blue-900/30 bg-black/80 backdrop-blur z-10">
+                    <div className="p-6 border-b border-blue-900/30">
+                        <h1 className="text-2xl font-black tracking-tighter text-blue-500 mb-1">AMO TWIN</h1>
+                        <div className="flex items-center text-[10px] text-blue-400 uppercase tracking-widest gap-2">
+                            <span className="h-2 w-2 bg-green-500 rounded-full animate-pulse"></span>
+                            Online
+                        </div>
+                    </div>
+
+                    {/* DATA STREAM */}
+                    <div className="flex-1 overflow-y-auto p-0">
+                        <table className="w-full text-left text-xs">
+                            <thead className="bg-blue-900/20 text-blue-300 sticky top-0 backdrop-blur">
+                                <tr><th className="p-3 font-bold">ID</th><th className="p-3">STATE</th><th className="p-3 text-right">READING</th></tr>
+                            </thead>
+                            <tbody className="divide-y divide-blue-900/20">
+                                {blocks.map(b => {
+                                    const t = telemetry[b.id] || {};
+                                    return (
+                                        <tr key={b.id} className="hover:bg-blue-900/10 transition-colors">
+                                            <td className="p-3 font-bold text-white">{b.id}</td>
+                                            <td className="p-3 text-gray-400">
+                                                {b.params.angle_deg !== undefined && <div>θ {b.params.angle_deg}°</div>}
+                                                {b.params.power_mw !== undefined && <div>P {b.params.power_mw}mW</div>}
+                                            </td>
+                                            <td className="p-3 text-right font-bold text-yellow-400">
+                                                {t.power_mw ? t.power_mw.toFixed(2) : "-"} <span className="text-[9px] text-gray-600">mW</span>
+                                            </td>
+                                        </tr>
+                                    )
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {/* CONSOLE */}
+                    <div className="h-48 border-t border-blue-900/30 bg-black p-3 flex flex-col">
+                        <div className="flex-1 overflow-y-auto mb-2 space-y-1">
+                            {logs.map((l,i) => <div key={i} className="text-[10px] text-green-500/80 break-words font-mono">{l}</div>)}
+                        </div>
+                        <button onClick={toggleMic} className={`w-full py-3 text-xs font-bold tracking-widest uppercase border ${listening ? 'border-red-500 text-red-500 bg-red-900/20' : 'border-blue-600 text-blue-400 hover:bg-blue-900/30'} transition-all`}>
+                            {listening ? "Listening..." : "Input Command"}
+                        </button>
+                    </div>
+                </div>
+
+                {/* 3D STAGE */}
+                <div className="flex-1 relative bg-gradient-to-b from-gray-900 to-black">
+                    <OpticalTable blocks={blocks} />
+                    
+                    <div className="absolute top-6 right-6 flex gap-4">
+                        <div className="bg-black/50 backdrop-blur border border-white/10 px-4 py-2 rounded text-xs">
+                            <span className="text-gray-500 block text-[9px] uppercase">Wavelength</span>
+                            1064nm
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
